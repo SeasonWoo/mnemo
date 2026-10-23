@@ -137,6 +137,46 @@ def build_tools():
             },
         },
         {
+            "name": "list_skills",
+            "annotations": READ_ONLY,
+            "description": (
+                "Agent skills installed on this machine (and, with host, on registered devices): every folder in"
+                " the user-level skill directories of Claude Code, Codex, Pi, Grok, OpenCode, agy and ~/.agents,"
+                " as a link, a real folder or a dangling link, with a hash of its content. With query, returns"
+                " the skills whose SKILL.md name or description contains every word instead."
+                " Returns {devices, issues} (issues: dangling links, names whose copies differ) or {hits}."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "words to find in skill names and descriptions"},
+                    "host": {"type": "string", "description": "local (default), all, or comma-separated device names"},
+                },
+            },
+        },
+        {
+            "name": "skill_usage",
+            "annotations": READ_ONLY,
+            "description": (
+                "How often indexed sessions used each skill, per device and agent: calls and sessions in the"
+                " window, split by trigger (user = asked for by name, tool = Claude Code's Skill tool,"
+                " read = the agent read its SKILL.md), all-time total and last use."
+                " unused lists installed skills no device used in the window; gaps lists skills used in 3+"
+                " sessions on one device that another device lacks."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "since": {"type": "string", "description": "Nd or YYYY-MM-DD (default 30d)"},
+                    "by": {"type": "string", "description": "group by device and/or agent, comma-separated (default device,agent)"},
+                    "host": {"type": "string", "description": "local, all (default), or comma-separated device names"},
+                    "unused": {"type": "boolean"},
+                    "gaps": {"type": "boolean"},
+                    "limit": {"type": "integer", "description": "max rows (default 50)"},
+                },
+            },
+        },
+        {
             "name": "reindex",
             "annotations": WRITES_LOCAL_INDEX,
             "description": "Incrementally scan local session files for new/changed sessions. Cheap when nothing changed.",
@@ -246,6 +286,24 @@ def handle_call(name, args, index):
             limit=min(int(args.get("limit", 25)), 100),
         )
         return _text_result(rows)
+    if name == "list_skills":
+        from . import skills
+
+        query = (args.get("query") or "").strip()
+        devices, warnings = skills.collect("search" if query else "ls", index.db_path,
+                                           host=args.get("host") or LOCAL, query=query)
+        if query:
+            return _text_result({"hits": skills.search(devices, query), "warnings": warnings})
+        return _text_result({"devices": devices, "issues": skills.issues(devices), "warnings": warnings})
+    if name == "skill_usage":
+        from . import skills
+
+        by = [b.strip() for b in (args.get("by") or "device,agent").split(",") if b.strip() in ("device", "agent")]
+        since = args.get("since") or "30d"
+        devices, warnings = skills.collect("stats", index.db_path, host=args.get("host") or "all", since=since)
+        out = skills.report(devices, by, since, bool(args.get("unused")), bool(args.get("gaps")), warnings)
+        out["rows"] = [r for r in out["rows"] if r["calls"]][:min(int(args.get("limit", 50)), 500)]
+        return _text_result(out)
     if name == "reindex":
         sources = args.get("source")
         try:
@@ -265,7 +323,7 @@ def call_arguments(params):
     return arguments
 
 
-def call_fresh(name, args, timeout=900):
+def call_fresh(name, args, timeout=900, db_path=None):
     """Run one tool call in a new process, so it always uses the code on disk now.
 
     This server lives as long as the agent session that started it; answering in
@@ -274,7 +332,9 @@ def call_fresh(name, args, timeout=900):
     from .link import self_argv
 
     try:
-        p = subprocess.run(self_argv() + ["mcp", "--call", name or ""], input=json.dumps(args or {}),
+        # The tool process answers from the index this server was started with (--db).
+        db = ["--db", db_path] if db_path else []
+        p = subprocess.run(self_argv() + db + ["mcp", "--call", name or ""], input=json.dumps(args or {}),
                            capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return _error("%s timed out after %ds" % (name, timeout))
@@ -285,14 +345,14 @@ def call_fresh(name, args, timeout=900):
         return _error(err[-1] if err else "tool process exited with %d" % p.returncode)
 
 
-def call_main(name):
+def call_main(name, db_path=None):
     """`mnemo mcp --call NAME`: one tool call, arguments as JSON on stdin, result on stdout."""
     try:
         args = json.loads(sys.stdin.read() or "{}")
     except ValueError as exc:
         args, result = None, _error("bad arguments: %s" % exc)
     if args is not None:
-        index = Index()
+        index = Index(db_path)
         try:
             result = handle_call(name, args, index)
         except Exception as exc:
@@ -307,12 +367,12 @@ def _error(text):
     return {"content": [{"type": "text", "text": "error: %s" % text}], "isError": True}
 
 
-def run():
+def run(db_path=None):
     from . import live
 
     live.mark("mcp")
     sys.stderr.write("mnemo mcp: indexing sessions...\n")
-    index = Index()
+    index = Index(db_path)
     try:
         stats = index.sync(logger=lambda m: sys.stderr.write(m + "\n"))
     except IndexTooNew as exc:
@@ -349,7 +409,7 @@ def run():
             resp = {"jsonrpc": "2.0", "id": rid, "result": {"tools": tools}}
         elif method == "tools/call":
             params = req.get("params") or {}
-            result = call_fresh(params.get("name"), call_arguments(params))
+            result = call_fresh(params.get("name"), call_arguments(params), db_path=db_path)
             resp = {"jsonrpc": "2.0", "id": rid, "result": result}
         elif method == "ping":
             resp = {"jsonrpc": "2.0", "id": rid, "result": {}}
