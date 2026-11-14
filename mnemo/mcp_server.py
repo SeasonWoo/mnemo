@@ -6,6 +6,7 @@ from . import __version__
 from .index import Index, IndexTooNew
 from . import remote as remote_mod
 from .remote import LOCAL, fan_out_search, remote_context, remote_session
+from .search import since_start
 from .search import (CONTEXT_MAX_CHARS, DEFAULT_KINDS, caller_session_ids, clip_bodies, context_max_chars,
                      get_context, get_session, raw_context, raw_session, recent, split_ids)
 
@@ -26,7 +27,7 @@ def build_tools():
             "name": "search_sessions",
             "annotations": READ_ONLY,
             "description": (
-                "Full-text search across coding-agent sessions (claude, codex, opencode, pi, agy, grok) on this machine"
+                "Full-text search across coding-agent sessions (claude, codex, dsh, opencode, pi, agy, grok) on this machine"
                 " and registered remote devices. Matches user prompts, assistant replies, summaries,"
                 " tool calls and tool results. Each hit gives host, source, account (the agent config dir it came"
                 " from, e.g. .claude-work), cwd, timestamp, a snippet,"
@@ -43,13 +44,13 @@ def build_tools():
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "keywords, whitespace-separated (all must match)"},
-                    "source": {"type": "string", "description": "comma-separated subset of: claude,codex,opencode,pi,agy,grok"},
+                    "source": {"type": "string", "description": "comma-separated subset of: claude,codex,dsh,opencode,pi,agy,grok"},
                     "kinds": {
                         "type": "string",
                         "description": "comma-separated subset of: text,summary,tool_call,tool_result,reasoning (default: text,summary,tool_call,tool_result)",
                     },
                     "cwd": {"type": "string", "description": "only sessions whose working directory contains this substring"},
-                    "since": {"type": "string", "description": "YYYY-MM-DD"},
+                    "since": {"type": "string", "description": "Nd (e.g. 30d) or YYYY-MM-DD"},
                     "host": {"type": "string", "description": host_desc},
                     "limit": {"type": "integer", "description": "max hits (default 20)"},
                     "include_injected": {
@@ -129,9 +130,9 @@ def build_tools():
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "source": {"type": "string", "description": "comma-separated subset of: claude,codex,opencode,pi,agy,grok"},
+                    "source": {"type": "string", "description": "comma-separated subset of: claude,codex,dsh,opencode,pi,agy,grok"},
                     "cwd": {"type": "string", "description": "only sessions whose working directory contains this substring"},
-                    "since": {"type": "string", "description": "YYYY-MM-DD"},
+                    "since": {"type": "string", "description": "Nd (e.g. 30d) or YYYY-MM-DD"},
                     "limit": {"type": "integer", "description": "max sessions (default 25)"},
                 },
             },
@@ -183,7 +184,7 @@ def build_tools():
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "source": {"type": "string", "description": "comma-separated subset of: claude,codex,opencode,pi,agy,grok"},
+                    "source": {"type": "string", "description": "comma-separated subset of: claude,codex,dsh,opencode,pi,agy,grok"},
                 },
             },
         },
@@ -195,11 +196,7 @@ def _text_result(obj):
 
 
 def _since(value):
-    if not value:
-        return None
-    if len(value) == 10:
-        return value + "T00:00:00Z"
-    return value
+    return since_start(value)  # a bad value raises; call_main turns it into a tool error
 
 
 def _excluded_sessions(args, meta):
